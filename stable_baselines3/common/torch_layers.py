@@ -63,6 +63,7 @@ class NatureCNN(BaseFeaturesExtractor):
         super(NatureCNN, self).__init__(observation_space, features_dim)
         # We assume CxHxW images (channels first)
         # Re-ordering will be done by pre-preprocessing or wrapper
+        '''
         assert is_image_space(observation_space), (
             "You should use NatureCNN "
             f"only with images not with {observation_space}\n"
@@ -71,6 +72,7 @@ class NatureCNN(BaseFeaturesExtractor):
             "please check it using our env checker:\n"
             "https://stable-baselines3.readthedocs.io/en/master/common/env_checker.html"
         )
+        '''
         n_input_channels = observation_space.shape[0]
         self.cnn = nn.Sequential(
             nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
