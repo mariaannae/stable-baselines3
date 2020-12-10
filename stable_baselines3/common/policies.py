@@ -9,6 +9,7 @@ import gym
 import numpy as np
 import torch as th
 from torch import nn
+import tensorflow as tf
 
 from stable_baselines3.common.distributions import (
     BernoulliDistribution,
@@ -20,10 +21,11 @@ from stable_baselines3.common.distributions import (
     make_proba_distribution,
 )
 from stable_baselines3.common.preprocessing import get_action_dim, is_image_space, preprocess_obs
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, FlattenExtractor, MlpExtractor, NatureCNN, create_mlp
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, FlattenExtractor, MlpExtractor, NatureCNN, create_mlp, lstm, AttnCnn, AttnCnnMin, NewCNN1, DropoutCNN
 from stable_baselines3.common.utils import get_device, is_vectorized_observation
 from stable_baselines3.common.vec_env import VecTransposeImage
 from stable_baselines3.common.vec_env.obs_dict_wrapper import ObsDictWrapper
+
 
 
 class BaseModel(nn.Module, ABC):
@@ -859,3 +861,239 @@ def register_policy(name: str, policy: Type[BasePolicy]) -> None:
         if _policy_registry[sub_class][name] != policy:
             raise ValueError(f"Error: the name {name} is already registered for a different policy, will not override.")
     _policy_registry[sub_class][name] = policy
+
+
+
+class SelfAttnCnnPolicy(ActorCriticPolicy):
+
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Callable,
+        net_arch: Optional[List[Union[int, Dict[str, List[int]]]]] = None,
+        activation_fn: Type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        sde_net_arch: Optional[List[int]] = None,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: Type[BaseFeaturesExtractor] = AttnCnn,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        super(SelfAttnCnnPolicy, self).__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            sde_net_arch,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+        )
+
+class SelfAttnPolicy(ActorCriticPolicy):
+
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Callable,
+        net_arch: Optional[List[Union[int, Dict[str, List[int]]]]] = None,
+        activation_fn: Type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        sde_net_arch: Optional[List[int]] = None,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: Type[BaseFeaturesExtractor] = AttnCnnMin,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        super(SelfAttnPolicy, self).__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            sde_net_arch,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+        )
+
+class NewCnnPolicy(ActorCriticPolicy):
+    """
+    CNN policy class for actor-critic algorithms (has both policy and value prediction).
+    Used by A2C, PPO and the likes.
+
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param lr_schedule: Learning rate schedule (could be constant)
+    :param net_arch: The specification of the policy and value networks.
+    :param activation_fn: Activation function
+    :param ortho_init: Whether to use or not orthogonal initialization
+    :param use_sde: Whether to use State Dependent Exploration or not
+    :param log_std_init: Initial value for the log standard deviation
+    :param full_std: Whether to use (n_features x n_actions) parameters
+        for the std instead of only (n_features,) when using gSDE
+    :param sde_net_arch: Network architecture for extracting features
+        when using gSDE. If None, the latent features from the policy will be used.
+        Pass an empty list to use the states as features.
+    :param use_expln: Use ``expln()`` function instead of ``exp()`` to ensure
+        a positive standard deviation (cf paper). It allows to keep variance
+        above zero and prevent it from growing too fast. In practice, ``exp()`` is usually enough.
+    :param squash_output: Whether to squash the output using a tanh function,
+        this allows to ensure boundaries when using gSDE.
+    :param features_extractor_class: Features extractor to use.
+    :param features_extractor_kwargs: Keyword arguments
+        to pass to the features extractor.
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param optimizer_class: The optimizer to use,
+        ``th.optim.Adam`` by default
+    :param optimizer_kwargs: Additional keyword arguments,
+        excluding the learning rate, to pass to the optimizer
+    """
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Callable,
+        net_arch: Optional[List[Union[int, Dict[str, List[int]]]]] = None,
+        activation_fn: Type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        sde_net_arch: Optional[List[int]] = None,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: Type[BaseFeaturesExtractor] = NewCNN1,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        super(NewCnnPolicy, self).__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            sde_net_arch,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+        )
+
+class DropoutCnnPolicy(ActorCriticPolicy):
+    """
+    CNN policy class for actor-critic algorithms (has both policy and value prediction).
+    Used by A2C, PPO and the likes.
+
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param lr_schedule: Learning rate schedule (could be constant)
+    :param net_arch: The specification of the policy and value networks.
+    :param activation_fn: Activation function
+    :param ortho_init: Whether to use or not orthogonal initialization
+    :param use_sde: Whether to use State Dependent Exploration or not
+    :param log_std_init: Initial value for the log standard deviation
+    :param full_std: Whether to use (n_features x n_actions) parameters
+        for the std instead of only (n_features,) when using gSDE
+    :param sde_net_arch: Network architecture for extracting features
+        when using gSDE. If None, the latent features from the policy will be used.
+        Pass an empty list to use the states as features.
+    :param use_expln: Use ``expln()`` function instead of ``exp()`` to ensure
+        a positive standard deviation (cf paper). It allows to keep variance
+        above zero and prevent it from growing too fast. In practice, ``exp()`` is usually enough.
+    :param squash_output: Whether to squash the output using a tanh function,
+        this allows to ensure boundaries when using gSDE.
+    :param features_extractor_class: Features extractor to use.
+    :param features_extractor_kwargs: Keyword arguments
+        to pass to the features extractor.
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param optimizer_class: The optimizer to use,
+        ``th.optim.Adam`` by default
+    :param optimizer_kwargs: Additional keyword arguments,
+        excluding the learning rate, to pass to the optimizer
+    """
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Callable,
+        net_arch: Optional[List[Union[int, Dict[str, List[int]]]]] = None,
+        activation_fn: Type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        sde_net_arch: Optional[List[int]] = None,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: Type[BaseFeaturesExtractor] = DropoutCNN,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        super(DropoutCnnPolicy, self).__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            sde_net_arch,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+        )

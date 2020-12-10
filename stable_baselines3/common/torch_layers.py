@@ -8,6 +8,10 @@ from torch import nn
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.utils import get_device
 
+import torch.nn.functional as F
+from torch.autograd import Variable
+import numpy as np
+
 
 class BaseFeaturesExtractor(nn.Module):
     """
@@ -182,7 +186,8 @@ class MlpExtractor(nn.Module):
                 shared_net.append(activation_fn())
                 last_layer_dim_shared = layer_size
             else:
-                assert isinstance(layer, dict), "Error: the net_arch list can only contain ints and dicts"
+                if not isinstance(layer, dict): continue
+                #assert isinstance(layer, dict), "Error: the net_arch list can only contain ints and dicts"
                 if "pi" in layer:
                     assert isinstance(layer["pi"], list), "Error: net_arch[-1]['pi'] must contain a list of integers."
                     policy_only_layers = layer["pi"]
@@ -266,3 +271,294 @@ def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> T
         assert "qf" in net_arch, "Error: no key 'qf' was provided in net_arch for the critic network"
         actor_arch, critic_arch = net_arch["pi"], net_arch["qf"]
     return actor_arch, critic_arch
+
+def lstm(input_tensor, mask_tensor, cell_state_hidden, scope, n_hidden, init_scale=1.0, layer_norm=False):
+    """
+    Creates an Long Short Term Memory (LSTM) cell for TensorFlow
+
+    :param input_tensor: (TensorFlow Tensor) The input tensor for the LSTM cell
+    :param mask_tensor: (TensorFlow Tensor) The mask tensor for the LSTM cell
+    :param cell_state_hidden: (TensorFlow Tensor) The state tensor for the LSTM cell
+    :param scope: (str) The TensorFlow variable scope
+    :param n_hidden: (int) The number of hidden neurons
+    :param init_scale: (int) The initialization scale
+    :param layer_norm: (bool) Whether to apply Layer Normalization or not
+    :return: (TensorFlow Tensor) LSTM cell
+    """
+    _, n_input = [v.value for v in input_tensor[0].get_shape()]
+    with tf.variable_scope(scope):
+        weight_x = tf.get_variable("wx", [n_input, n_hidden * 4], initializer=ortho_init(init_scale))
+        weight_h = tf.get_variable("wh", [n_hidden, n_hidden * 4], initializer=ortho_init(init_scale))
+        bias = tf.get_variable("b", [n_hidden * 4], initializer=tf.constant_initializer(0.0))
+
+        if layer_norm:
+            # Gain and bias of layer norm
+            gain_x = tf.get_variable("gx", [n_hidden * 4], initializer=tf.constant_initializer(1.0))
+            bias_x = tf.get_variable("bx", [n_hidden * 4], initializer=tf.constant_initializer(0.0))
+
+            gain_h = tf.get_variable("gh", [n_hidden * 4], initializer=tf.constant_initializer(1.0))
+            bias_h = tf.get_variable("bh", [n_hidden * 4], initializer=tf.constant_initializer(0.0))
+
+            gain_c = tf.get_variable("gc", [n_hidden], initializer=tf.constant_initializer(1.0))
+            bias_c = tf.get_variable("bc", [n_hidden], initializer=tf.constant_initializer(0.0))
+
+    cell_state, hidden = tf.split(axis=1, num_or_size_splits=2, value=cell_state_hidden)
+    for idx, (_input, mask) in enumerate(zip(input_tensor, mask_tensor)):
+        cell_state = cell_state * (1 - mask)
+        hidden = hidden * (1 - mask)
+        if layer_norm:
+            gates = _ln(tf.matmul(_input, weight_x), gain_x, bias_x) \
+                    + _ln(tf.matmul(hidden, weight_h), gain_h, bias_h) + bias
+        else:
+            gates = tf.matmul(_input, weight_x) + tf.matmul(hidden, weight_h) + bias
+        in_gate, forget_gate, out_gate, cell_candidate = tf.split(axis=1, num_or_size_splits=4, value=gates)
+        in_gate = tf.nn.sigmoid(in_gate)
+        forget_gate = tf.nn.sigmoid(forget_gate)
+        out_gate = tf.nn.sigmoid(out_gate)
+        cell_candidate = tf.tanh(cell_candidate)
+        cell_state = forget_gate * cell_state + in_gate * cell_candidate
+        if layer_norm:
+            hidden = out_gate * tf.tanh(_ln(cell_state, gain_c, bias_c))
+        else:
+            hidden = out_gate * tf.tanh(cell_state)
+        input_tensor[idx] = hidden
+    cell_state_hidden = tf.concat(axis=1, values=[cell_state, hidden])
+    return input_tensor, cell_state_hidden
+
+"""
+class LSTM (BaseFeaturesExtractor):
+
+
+    :param observation_space:
+    :param features_dim: Number of features extracted.
+        This corresponds to the number of unit for the last layer.
+    
+
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super(NatureCNN, self).__init__(observation_space, features_dim)
+        # We assume CxHxW images (channels first)
+        # Re-ordering will be done by pre-preprocessing or wrapper
+        '''
+        assert is_image_space(observation_space), (
+            "You should use NatureCNN "
+            f"only with images not with {observation_space}\n"
+            "(you are probably using `CnnPolicy` instead of `MlpPolicy`)\n"
+            "If you are using a custom environment,\n"
+            "please check it using our env checker:\n"
+            "https://stable-baselines3.readthedocs.io/en/master/common/env_checker.html"
+        )
+        '''
+        n_input_channels = observation_space.shape[0]
+        self.cnn = nn.Sequential(
+            #nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=1, padding=0),
+            nn.ReLU(),
+            #nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.Conv2d(32, 64, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            n_flatten = self.cnn(th.as_tensor(observation_space.sample()[None]).float()).shape[1]
+
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+"""
+
+
+
+class Self_Attn(nn.Module):
+    """ Self attention Layer"""
+    #def __init__(self,in_dim,activation):
+    def __init__(self,in_dim):
+        super(Self_Attn,self).__init__()
+        self.chanel_in = in_dim
+        #self.activation = activation
+        
+        self.query_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+        self.key_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim//8 , kernel_size= 1)
+        self.value_conv = nn.Conv2d(in_channels = in_dim , out_channels = in_dim , kernel_size= 1)
+        self.gamma = nn.Parameter(th.zeros(1))
+
+        self.softmax  = nn.Softmax(dim=-1) #
+    def forward(self,x):
+        """
+            inputs :
+                x : input feature maps( B X C X W X H)
+            returns :
+                out : self attention value + input feature 
+                attention: B X N X N (N is Width*Height)
+        """
+        m_batchsize,C,width ,height = x.size()
+        proj_query  = self.query_conv(x).view(m_batchsize,-1,width*height).permute(0,2,1) # B X CX(N)
+        proj_key =  self.key_conv(x).view(m_batchsize,-1,width*height) # B X C x (*W*H)
+        energy =  th.bmm(proj_query,proj_key) # transpose check
+        attention = self.softmax(energy) # BX (N) X (N) 
+        proj_value = self.value_conv(x).view(m_batchsize,-1,width*height) # B X C X N
+
+        out = th.bmm(proj_value,attention.permute(0,2,1) )
+        out = out.view(m_batchsize,C,width,height)
+        
+        out = self.gamma*out + x
+        return attention[:, None, :,:,]
+
+class AttnCnn(nn.Module):
+    """
+    :param observation_space:
+    :param features_dim: Number of features extracted.
+        This corresponds to the number of unit for the last layer.
+    """
+
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super(AttnCnn, self).__init__()
+        # We assume CxHxW images (channels first)
+        # Re-ordering will be done by pre-preprocessing or wrapper
+        self.features_dim = features_dim
+        self.attn = Self_Attn(observation_space.shape[0])
+
+        n_input_channels = 1
+        self.cnn = nn.Sequential(
+            #nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=1, padding=0),
+            nn.ReLU(),
+            #nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.Conv2d(32, 64, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            n_flatten = self.cnn(self.attn(th.as_tensor(observation_space.sample()[None])).float()).shape[1]
+
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        return self.linear(self.cnn(self.attn(observations)))
+
+class AttnCnnMin(nn.Module):
+    """ Self attention Layer"""
+    #def __init__(self,in_dim,activation):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super(AttnCnnMin,self).__init__()
+        self.chanel_in = observation_space.shape[0]
+        #self.activation = activation
+        self.features_dim = features_dim
+
+        self.query_conv = nn.Conv2d(in_channels = self.chanel_in , out_channels = self.chanel_in//8 , kernel_size= 1)
+        self.key_conv = nn.Conv2d(in_channels = self.chanel_in , out_channels = self.chanel_in//8 , kernel_size= 1)
+        self.value_conv = nn.Conv2d(in_channels = self.chanel_in , out_channels = self.chanel_in , kernel_size= 1)
+        self.gamma = nn.Parameter(th.zeros(1))
+        self.softmax  = nn.Softmax(dim=-1) #
+
+        self.flatten = nn.Flatten()
+        n_flatten = 65536
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+        
+    def forward(self,x):
+        """
+            inputs :
+                x : input feature maps( B X C X W X H)
+            returns :
+                out : self attention value + input feature 
+                attention: B X features_dim)
+        """
+        m_batchsize,C,width ,height = x.size()
+        proj_query  = self.query_conv(x).view(m_batchsize,-1,width*height).permute(0,2,1) # B X CX(N)
+        proj_key =  self.key_conv(x).view(m_batchsize,-1,width*height) # B X C x (*W*H)
+        energy =  th.bmm(proj_query,proj_key) # transpose check
+        attention = self.softmax(energy) # BX (N) X (N) 
+        proj_value = self.value_conv(x).view(m_batchsize,-1,width*height) # B X C X N
+
+        out = th.bmm(proj_value,attention.permute(0,2,1) )
+        out = out.view(m_batchsize,C,width,height)
+        out = self.gamma*out + x
+
+        return self.linear(self.flatten(attention))
+
+class NewCNN1(BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super(NewCNN1, self).__init__(observation_space, features_dim)
+        # We assume CxHxW images (channels first)
+        # Re-ordering will be done by pre-preprocessing or wrapper
+
+        n_input_channels = observation_space.shape[0]
+        self.cnn = nn.Sequential(
+            #nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=6, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=0),
+            nn.ReLU(),
+            #nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.Conv2d(64, 128, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            n_flatten = self.cnn(th.as_tensor(observation_space.sample()[None]).float()).shape[1]
+            
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+        
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        return self.linear(self.cnn(observations))
+
+class DropoutCNN(BaseFeaturesExtractor):
+    """
+    CNN from DQN nature paper:
+        Mnih, Volodymyr, et al.
+        "Human-level control through deep reinforcement learning."
+        Nature 518.7540 (2015): 529-533.
+
+    :param observation_space:
+    :param features_dim: Number of features extracted.
+        This corresponds to the number of unit for the last layer.
+    """
+
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super(DropoutCNN, self).__init__(observation_space, features_dim)
+        # We assume CxHxW images (channels first)
+        # Re-ordering will be done by pre-preprocessing or wrapper
+        '''
+        assert is_image_space(observation_space), (
+            "You should use NatureCNN "
+            f"only with images not with {observation_space}\n"
+            "(you are probably using `CnnPolicy` instead of `MlpPolicy`)\n"
+            "If you are using a custom environment,\n"
+            "please check it using our env checker:\n"
+            "https://stable-baselines3.readthedocs.io/en/master/common/env_checker.html"
+        )
+        '''
+        n_input_channels = observation_space.shape[0]
+        self.cnn = nn.Sequential(
+            #nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Dropout2d(.3),
+            #nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.Conv2d(32, 64, kernel_size=4, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Dropout2d(.3),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Dropout2d(.3),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            n_flatten = self.cnn(th.as_tensor(observation_space.sample()[None]).float()).shape[1]
+
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        return self.linear(self.cnn(observations))
