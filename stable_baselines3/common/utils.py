@@ -78,7 +78,7 @@ def get_schedule_fn(value_schedule: Union[Callable, float]) -> Callable:
     :param value_schedule:
     :return:
     """
-    # If the passed schedule is a float
+        # If the passed schedule is a float
     # create a constant function
     if isinstance(value_schedule, (float, int)):
         # Cast to float to avoid errors
